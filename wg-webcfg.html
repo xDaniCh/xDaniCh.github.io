@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+  <title>Wireguard Config Generator</title>
+</head>
+
+<body>
+  <section class="section">
+    <div id="app" class="container">
+      <div class="columns">
+        <div class="column">
+          <h2 class="title">Wireguard Config Generator</h2>
+          This page intends to generate a config that can be saved to a server, which allows for all client config to be regenerated/updated from the servers config as required. The config is a very basic tunnel, where each client can only access the servers IP, and no routing/masquerading is allowed (ideal for single server remote access).
+          <div class="buttons">
+            <button class="button is-primary" @click="updateclients">Generate</button>
+            <button class="button is-warning" @click="modalactive = 'is-active'">Import Server Config</button>
+          </div>
+          <article class="panel">
+            <table class="table">
+              <tr>
+                <td>Server: <input v-model="server"></td>
+                <td>Port: <input v-model="port"></td>
+              </tr>
+              <tr>
+                <td>Net: <input v-model="network" size="4"> 1stIP: <input v-model="startip" size="1"></td>
+                <td>Clients: <input v-model="clientcount" size="3"></td>
+              </tr>
+              <tr>
+                <td>ServerPrivateKey: <input v-model="serverkeys.privateKey" size="10"></td>
+                <td>ServerPublicKey: <input v-model="serverkeys.publicKey" size="10"></td>
+              </tr>
+            </table>
+          </article>
+          <article class="panel">
+            <p class="panel-heading">Server config {{ server }}:{{ port }}</p>
+            <p class="panel-block" >
+              <code style="font-size:small;"><span @click="select">[Interface]<br>
+                Address = {{ network }}.1/24<br>
+                ListenPort = {{ port }}<br>
+                PrivateKey = {{ serverkeys.privateKey }}<br>
+                # PublicKey = {{ serverkeys.publicKey }}<br>
+                # Server = {{ server }}<br>
+                <span v-for="line in oldconfig">{{ line }}<br></span>
+                  <span v-for="(value, client) in clients"><br>
+                  [Peer]<br>
+                  ## {{ value.name }}<br>
+                  AllowedIPs = {{ network }}.{{ client }}/32<br>
+                  PublicKey = {{ value.publicKey }}<br>
+                  # PrivateKey = {{ value.privateKey }}<br>
+                  </span>
+                </span>
+              </code>
+            </p>
+          </article>
+        </div>
+        <div class="column">
+          <article class="panel">
+            <p class="panel-heading">Client configs (first ip: {{network}}.{{startip}}, count: {{ clientcount }})</p>
+            <div class="panel-block" v-for="(value, client) in clients">
+              <canvas :id="'canvas'+client"></canvas>
+              <div>
+                <input v-model="value.name">
+                <code class="panel-block" style="font-size:small;" :id="'code'+client"><span @click="select">[Interface]<br>
+                ## {{ value.name }}<br>
+                Address = {{ network }}.{{ client }}/24<br>
+                PrivateKey = {{ value.privateKey }}<br>
+                [Peer]<br>
+                PublicKey = {{ serverkeys.publicKey }}<br>
+                AllowedIPs = {{ network }}.1/32<br>
+                Endpoint = {{ server }}:{{ port }}
+                </span></code>
+              </div>
+              </div>
+          </article>
+        </div>
+      </div>
+      <div class="modal" :class="modalactive">
+        <div class="modal-background"></div>
+        <div class="modal-card">
+          <header class="modal-card-head">
+            <p class="modal-card-title">Import server config</p>
+            <button class="delete" aria-label="close" @click="modalactive = null"></button>
+          </header>
+          <section class="modal-card-body">
+            <textarea id="textimport" class="textarea" placeholder="Paste server config here"></textarea>
+          </section>
+          <footer class="modal-card-foot">
+            <button class="button is-success" @click="importconfig">Import</button>
+            <button class="button" @click="modalactive = null">Cancel</button>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script src="https://unpkg.com/vue@2.6.12/dist/vue.js"></script>
+  <script src="https://unpkg.com/qrcode@1.4.4/build/qrcode.min.js"></script>
+  <script src="wireguard.js"></script>
+  <script>
+    new Vue({
+      el: "#app",
+      data() {
+        return {
+          server: "wireguard.fqdn",
+          port: 51820,
+          network: "172.17.172",
+          startip: 2,
+          clientcount: 1,
+          oldconfig: [],
+          clients: {},
+          modalactive: null,
+          serverkeys: wireguard.generateKeypair()
+        };
+      },
+      methods: {
+        select(event) {
+          r = document.createRange(); r.selectNode(event.target.closest("span"));
+          s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        },
+        importconfig(event) {
+          var data = this;
+          var config = document.getElementById("textimport").value.split( /\n/ ) // split lines
+          config.map( line => line.trim() ) // cleanup whitespace
+          var section = null;
+          data.oldconfig = [];
+          config.forEach(line => {
+            if ( line.length ) {
+              if ( line.startsWith("[") ) { 
+                section = line;
+                if (section == "[Peer]") {
+                  data.oldconfig.push("");
+                  data.oldconfig.push(section);
+                } 
+              } else { 
+                var parts = line.split("=");
+                var key = parts.shift().trim();
+                var value = parts.join("=").trim();
+                switch (section + key) {
+                  case '[Interface]Address': data.network = value.split(".").slice(0,3).join("."); break;
+                  case '[Interface]ListenPort': data.port = value; break;
+                  case '[Interface]PrivateKey': data.serverkeys.privateKey = value; break;
+                  case '[Interface]# PublicKey': data.serverkeys.publicKey = value; break;
+                  case '[Interface]# Server': data.server = value; break;
+                  default:
+                    data.oldconfig.push(line)
+                    if (section + key == "[Peer]AllowedIPs") {
+                      var lastip = Math.floor(value.split(".").slice(-1)[0].split("/")[0])
+                      if (lastip + 1 > data.startip) {
+                        data.startip = lastip + 1;
+                      }
+                    }
+                } 
+              }
+            } 
+          })
+          data.modalactive = null;
+        },
+        updateclients(event) {
+          this.clients = this.makeclients;
+          var clients = this.clients;
+          setTimeout(function() {
+            for (client in clients) {
+              QRCode.toCanvas(document.getElementById('canvas' + client), document.getElementById('code' + client).innerText)
+            }
+          });
+        }
+      },
+      computed: {
+        makeclients() {
+          var c = {};
+          for (client in [...Array(Math.floor(this.clientcount)).keys()]) {
+            finaloctet = Math.floor(client) + Math.floor(this.startip);
+            c[finaloctet] = wireguard.generateKeypair();
+            c[finaloctet].name = "Client " + finaloctet;
+          }
+          return c
+        }
+      }
+    });
+  </script>
+</body>
+
+</html>
